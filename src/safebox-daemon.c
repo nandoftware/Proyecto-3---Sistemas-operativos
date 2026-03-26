@@ -61,7 +61,7 @@
 
 #include "safebox.h"
 
-#define PASSWORD "sbx2026"
+#define PASSWORD "hola"
 /* ---------------------------------------------------------------
  * Variable global para comunicar el manejador de señal con el loop
  * 'volatile sig_atomic_t' es el único tipo seguro en signal handlers
@@ -117,18 +117,22 @@ static void manejador_sigterm(int sig) {
 
 int main(int argc, char *argv[]){
 
-    // falto colocar el safebox
+    // por si falto colocar el safebox
     if(argc < 2){
         perror("falta el nombre del safebox");
         exit(EXIT_FAILURE);
     }
 
     // ojo pelado abrimos un fd de la boveda, al final del programa debe cerrarce
-    int sb_fd = open(argv[1], O_RDWR);
-    if(sb_fd < 0){
-        fprintf(stderr, "error: '%s' no es un drectorio valido", argv[1]);
+    DIR *sb_fd = opendir(argv[1]);
+    if(sb_fd == NULL){
+        fprintf(stderr, "error: '%s' no es un drectorio valido\n", argv[1]);
         exit(EXIT_FAILURE);
     }
+
+
+
+
     // Paso 0: hay que verificar si el safebox existe, y si tenemos permiso de escritura y lectura
     // si no, mandamos un mensaje de error en stderr 
 
@@ -137,9 +141,8 @@ int main(int argc, char *argv[]){
     leer_clave_segura(clave, sizeof(clave));
 
     // ahora hay que validar la clave:
-    if(!strcmp(PASSWORD, clave)){
+    if(strcmp(PASSWORD, clave)){
         perror("clave invalida"); // temporal
-        close(sb_fd);
         exit(EXIT_FAILURE);
     }
 
@@ -160,6 +163,34 @@ int main(int argc, char *argv[]){
     }
 
     // a partir de aqui estamos en el hijo, osea, el daemon
+
+    // creamos el fd del socked del daemon
+    int daemon_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (daemon_fd < 0) {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
+
+    // unlinkeamos el path del socked de una vez
+    unlink(SB_SOCKET_PATH);
+
+    // creamos el addr para baindear el socked despues
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, SB_SOCKET_PATH, sizeof(addr.sun_path) - 1);
+
+    // aqui lo baindeamos
+    if (bind(daemon_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("bind");
+        exit(EXIT_FAILURE);
+    }
+
+    // ponemos al socket en modo escucha, lo de que puede encolar hasta 5 conexiones - es temporal
+    if (listen(daemon_fd, 5) < 0) {
+        perror("listen");
+        exit(EXIT_FAILURE);
+    }
 
     // Paso 3: en este cuestionsito independizamos al daemon de la shell
     if (setsid() < 0) {
@@ -205,20 +236,111 @@ int main(int argc, char *argv[]){
     sigaction(SIGTERM, &sa, NULL);
 
     // ----------------- BUCLE PRINCIPAL DEL DAEMON -----------------
-    // char msg[256];
-    // snprintf(msg, sizeof(msg), "daemon iniciado pid=%d", getpid());
-    sb_log(log_fd, SB_LOG_INFO, "daemon iniciado pid=%d", getpid());
 
+    // acemos los logs de que se inicio el daemon y de que esta escuchando de su socket
+    sb_log(log_fd, SB_LOG_INFO, "daemon iniciado pid=%d %s", getpid(), argv[1]);
+    sb_log(log_fd, SB_LOG_INFO, "escuchando en %s", SB_SOCKET_PATH);
+
+    // esta funcioncita es muy importante, pues sin ella el proceso nujnca se puede cerrar bien
+    // si solo dejo el accept() dentro del bucle, resulta que este carajo va a bloquear al proceso
+    // mientras que le llega una conexion, incluso si mando un KILL -TERM, el proceso va a seguir
+    // bloqueado por el accept, para lo cual hacia falta meterce en la shell a hacer lo que sea para 
+    // que el accept reaccionace y volviera a verificar la condicion del bucle.
+    // ahora este socked no se bloquea con nada.
+    fcntl(daemon_fd, F_SETFL, O_NONBLOCK);
     while (seguir_corriendo) {
+        
+        struct ucred peer;
+        socklen_t peer_len = sizeof(peer);
+        // aqui empezamos con el accept() para bloquear al daemon hasta que llegue una conexion
+        int cliente_fd = accept(daemon_fd, NULL, NULL);
+        if (cliente_fd < 0) {
+            // si el nuevo socket es -1, y como estamos en un socket no bloqueante, puede ser
+            // que el accept, como no consiguio conexiones, mandace alguno de dos erroes en errno
+            // EAGAIN significa: recurso temporalmente no disponible
+            // EWOULDBLOCK: entiendo que este significa que una operacion no puedo completarse porque
+            // no esta lista
+            // El caso es que si manda alguno de estos, no queremos matar al proceso con un error
+            if (errno == EAGAIN || errno == EWOULDBLOCK){
+                continue;
+            }
+            else{
+                perror("accept");
+                exit(EXIT_FAILURE);   /* intentar con el siguiente cliente */
+            }
+        }
+        else{
 
-        // En SafeBox aquí iría accept() esperando conexiones.
+            // para el log del pid y el uid
+        
+            if (getsockopt(cliente_fd, SOL_SOCKET, SO_PEERCRED,
+                        &peer, &peer_len) == 0) {
+                sb_log(log_fd, SB_LOG_INFO, "conexion entrante uid=%d pid=%d", peer.uid, peer.pid);
+            }
+
+        }
+
+        
+
+        // char buf[256];
+        sb_auth_msg_t buf;
+        
+        // ssize_t n;
+        ssize_t n = read(cliente_fd, &buf, sizeof(buf));
+        // while ((n = read(cliente_fd, buf, sizeof(buf) - 1)) > 0) {
+        //     buf[n] = '\0';
+        //     // printf("%s", buf);
+        // }
+        if (n != sizeof(buf)){
+            sb_log(log_fd, SB_LOG_ERROR, "no se puedo recibier el coso con n %d", n);
+            exit(EXIT_FAILURE);
+        }
+
+        sb_log(log_fd, SB_LOG_WARN, "se recivio: %d", buf.op);
+
+        if(buf.op == 0x01){
+            // aqui hay dos posibilidades, si no hay mas nada entonces quiero llamar a list
+            // pero si hay algo mas entonces quiero autenticar
+
+            if(buf.password_hash != 0x00){
+                // queremos autenticar
+                uint32_t pass_hash = sb_djb2(PASSWORD);
+                uint8_t op;
+                if (pass_hash == buf.password_hash){
+                    // le mandamos que todo chevere (0x00)
+                    op = SB_OK;
+                    write(cliente_fd, &op,sizeof(op));
+                    sb_log(log_fd, SB_LOG_OK, "autenticacion exitosa uid=%d pid=%d", peer.uid, peer.pid);
+                }
+                else{
+                    // le mandamos error de autenticacion (0x01)
+                    op = SB_ERR_AUTH;
+                    write(cliente_fd, &op, sizeof(op));
+                    sb_log(log_fd, SB_LOG_WARN, "autenticacion fallida uid=%d pid=%d", peer.uid, peer.pid);
+                }
+            }
+            else{
+                // queremos hacer list 
+            }
+
+        }
+        else if(buf.op == 0x05){
+            sb_log(log_fd, SB_LOG_INFO, "BYE uid=%d pid=%d - sesion cerrada", peer.uid, peer.pid);
+            close(cliente_fd);
+        }
+
+
+
+
     }
-
+    
     sb_log(log_fd, SB_LOG_INFO, "SIGTERM recibido — daemon terminado limpiamente");
     // Paso 9: limpear todos los fd
     close(log_fd);
-    close(sb_fd);
+    closedir(sb_fd);
+    close(daemon_fd);
     // falta cerrar el fd del socket
+
     unlink(SB_PID_PATH);
     unlink(SB_SOCKET_PATH);
 
