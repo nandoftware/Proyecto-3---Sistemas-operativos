@@ -85,6 +85,53 @@ int int82char(char *string, uint8_t *payload, int payload_size, int begin){
     return cont;
 }
 
+static int recibir_fd(int socket_fd) {
+
+    /* Byte dummy que el sender envía como datos reales */
+    char dummy;
+    struct iovec iov = {
+        .iov_base = &dummy,
+        .iov_len  = sizeof(dummy)
+    };
+
+    /* Buffer para el mensaje de control (mismo tamaño que el sender) */
+    union {
+        struct cmsghdr cmh;
+        char           control[CMSG_SPACE(sizeof(int))];
+    } control_buf;
+
+    memset(&control_buf, 0, sizeof(control_buf));
+
+    struct msghdr msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_iov        = &iov;
+    msg.msg_iovlen     = 1;
+    msg.msg_control    = control_buf.control;
+    msg.msg_controllen = sizeof(control_buf.control);
+
+    /* recvmsg() bloquea hasta recibir el mensaje.
+     * El kernel ya duplicó el fd en nuestra tabla de fds
+     * antes de que recvmsg() retorne. */
+    if (recvmsg(socket_fd, &msg, 0) < 0) {
+        perror("recvmsg");
+        exit(EXIT_FAILURE);
+    }
+
+    /* Extraer el fd del mensaje de control */
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    if (cmsg == NULL ||
+        cmsg->cmsg_level != SOL_SOCKET ||
+        cmsg->cmsg_type  != SCM_RIGHTS) {
+        fprintf(stderr, "No se recibió SCM_RIGHTS\n");
+        exit(EXIT_FAILURE);
+    }
+
+    int fd_recibido;
+    memcpy(&fd_recibido, CMSG_DATA(cmsg), sizeof(int));
+    return fd_recibido;
+}
+
+
 int sb_connect(const char *socket_path, const char *password){
 
     int sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -184,29 +231,36 @@ int sb_list(int sockfd, char *buf, size_t buflen){
 }
 
 int sb_get(int sockfd, const char *filename){
-    (void)sockfd;
-    (void)filename;
+    wire_format message;
+    message.op = SB_OP_GET;
+    char2int8(filename, message.payload, sizeof(filename), 0);
+
+    write(sockfd, &message, sizeof(message));
+
+    int fd = recibir_fd(sockfd);
     
-    return -1;
+    
+
+    return fd;
 }
 
 int sb_put(int sockfd, const char *filename, const char *filepath){
     wire_format message;
     message.op = SB_OP_PUT;
-    printf("tamano filename: %ld , %ld\n",sizeof(filename), sizeof(message.payload));
+    // printf("tamano filename: %ld , %ld\n",sizeof(filename), sizeof(message.payload));
 
     char2int8(filename, message.payload, sizeof(filename), 0);
-    for (int i = 0; i < 40; i++)
-    {
-        printf("letra: %d\n", message.payload[i]);
-    }
-    printf("tamano filename: %ld , %ld\n",sizeof(filename), sizeof(message.payload));
+    // for (int i = 0; i < 40; i++)
+    // {
+    //     printf("letra: %d\n", message.payload[i]);
+    // }
+    // printf("tamano filename: %ld , %ld\n",sizeof(filename), sizeof(message.payload));
     char2int8(filepath, message.payload, sizeof(message.payload), sizeof(filename));
     
-    for (int i = 0; i < 40; i++)
-    {
-        printf("letra: %d\n", message.payload[i]);
-    }
+    // for (int i = 0; i < 40; i++)
+    // {
+    //     printf("letra: %d\n", message.payload[i]);
+    // }
     write(sockfd, &message, sizeof(message));
 
     uint8_t op;

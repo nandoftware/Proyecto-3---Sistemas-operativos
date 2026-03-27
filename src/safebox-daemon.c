@@ -113,10 +113,79 @@ int int82char(char *string, uint8_t *payload, int payload_size, int begin){
     return cont;
 }
 void XOR(char * original){
+    
     int g = 0;
     while (original[g] != '\0')
     {
-        original[g] = PASSWORD[g % PASSWORD_LEN];
+        original[g] ^= PASSWORD[g % PASSWORD_LEN];
+        g++;
+    }
+    
+}
+
+
+static void enviar_fd(int socket_fd, int fd_a_enviar) {
+
+    /* -------------------------------------------------------
+     * Necesitamos enviar al menos 1 byte de datos junto con
+     * el mensaje de control. Muchos sistemas ignoran un
+     * msghdr con iov_len=0 y nunca entregan el SCM_RIGHTS.
+     * Enviamos un byte "insignificante" como dummy.
+     * ------------------------------------------------------- */
+    char dummy = '!';
+    struct iovec iov = {
+        .iov_base = &dummy,
+        .iov_len  = sizeof(dummy)
+    };
+
+    /* -------------------------------------------------------
+     * Buffer para el mensaje de control.
+     *
+     * CMSG_SPACE(sizeof(int)) calcula cuántos bytes necesita
+     * la cabecera cmsghdr + el payload (un int = un fd).
+     * Usamos un union para garantizar alineación correcta.
+     * ------------------------------------------------------- */
+    union {
+        struct cmsghdr cmh;
+        char           control[CMSG_SPACE(sizeof(int))];
+    } control_buf;
+
+    memset(&control_buf, 0, sizeof(control_buf));
+
+    /* -------------------------------------------------------
+     * Llenar el msghdr principal
+     * ------------------------------------------------------- */
+    struct msghdr msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_iov        = &iov;
+    msg.msg_iovlen     = 1;
+    msg.msg_control    = control_buf.control;
+    msg.msg_controllen = sizeof(control_buf.control);
+
+    /* -------------------------------------------------------
+     * Llenar el cmsghdr (cabecera del mensaje de control)
+     *
+     * CMSG_FIRSTHDR() devuelve puntero al primer cmsghdr
+     * cmsg_level = SOL_SOCKET   (nivel socket)
+     * cmsg_type  = SCM_RIGHTS   (tipo: transferir file descriptors)
+     * cmsg_len   = tamaño total de este mensaje de control
+     * ------------------------------------------------------- */
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type  = SCM_RIGHTS;
+    cmsg->cmsg_len   = CMSG_LEN(sizeof(int));
+
+    /* CMSG_DATA() apunta al payload del mensaje de control.
+     * Ahí copiamos el fd que queremos transferir. */
+    memcpy(CMSG_DATA(cmsg), &fd_a_enviar, sizeof(int));
+
+    /* -------------------------------------------------------
+     * Enviar el mensaje con sendmsg()
+     * El kernel se encarga de duplicar el fd en el receptor.
+     * ------------------------------------------------------- */
+    if (sendmsg(socket_fd, &msg, 0) < 0) {
+        perror("sendmsg");
+        exit(EXIT_FAILURE);
     }
     
 }
@@ -418,15 +487,13 @@ int main(int argc, char *argv[]){
             cliente_fd = -1;
         }
         else if(buf.op == SB_OP_DEL){
-            
-            char *origina_path = argv[1];
-            // strcpy(argv[1], origina_path);
+            char origina_path[strlen(argv[1]) + 1];
+            origina_path[strlen(argv[1]) + 1] = '\0';
+            strcpy(origina_path, argv[1]);
             char filename[sizeof(buf.payload)];
             int82char(filename, buf.payload, sizeof(buf.payload), 0);
 
-            
             strcat(origina_path, filename);
-            
             
             uint8_t op = 0;
             if(unlink(origina_path) == 0){
@@ -437,12 +504,14 @@ int main(int argc, char *argv[]){
             else{
                 op = SB_ERR_NOFILE;
                 write(cliente_fd, &op, sizeof(op));
-                sb_log(log_fd, SB_LOG_ERROR, "no se puedo eliminar %s (pid=%d)", filename, peer.pid);
+                sb_log(log_fd, SB_LOG_WARN, "no se puedo eliminar %s (pid=%d)", filename, peer.pid);
 
             }
         }
         else if(buf.op == SB_OP_PUT){
-            char *origina_path = argv[1];
+            char origina_path[strlen(argv[1]) + 1];
+            origina_path[strlen(argv[1]) + 1] = '\0';
+            strcpy(origina_path, argv[1]);
             char filename[MAX_PAYLOAD_SIZE];
             char fp[MAX_PAYLOAD_SIZE];
             
@@ -453,59 +522,98 @@ int main(int argc, char *argv[]){
             strcat(origina_path, filename);
 
             FILE *fptr;
-            // Crea un archivo llamado "archivo.txt" en modo escritura
+            
             fptr = fopen(origina_path, "w");
             
             int fp_fd = open(fp, O_RDONLY);
 
             uint8_t op = SB_OK;
             char content[1024];
-            ssize_t j = read(fp_fd, content, sizeof(content));
-            if(j != sizeof(content)){
-                write(cliente_fd, &op, sizeof(op));
-            }
+            read(fp_fd, content, sizeof(content));
+            // if(j != sizeof(content)){
+            //     write(cliente_fd, &op, sizeof(op));
+            //     sb_log(log_fd, SB_LOG_ERROR, "entre en 1");
+                
+            // }
 
             if(fptr == NULL) {
                 op = SB_ERR_NOFILE;
                 write(cliente_fd, &op, sizeof(op));
+                sb_log(log_fd, SB_LOG_WARN, "PUT %s - no se pudo crear el archivo (pid=%d)", filename, peer.pid);
+                
             }
 
-            char magic[SB_MAGIC_LEN + 1] = SB_MAGIC;
-
+            
+            char magic[2048] = SB_MAGIC;
+            
+            
+            
             strcat(magic, content);
+
+            
             XOR(magic);
-            char header[8];
-            uint32_t ml = SB_MAGIC_LEN ;
-            header[0] = 0x01;
-            int32toint8(&ml, header, 1);
-            header[5] = 0x00;
-            header[6] = 0x00;
-            header[7] = 0x00;
+            for (int a = 0; a < 40; a++)
+            {
+                sb_log(log_fd, SB_LOG_ERROR, "%d", magic[a]);
+            }
+            // char header[8];
+            // uint32_t ml = SB_MAGIC_LEN ;
+            // header[0] = 0x01;
+            // int32toint8(&ml, header, 1);
+            // header[5] = 0x00;
+            // header[6] = 0x00;
+            // header[7] = 0x00;
 
-            strcat(header, magic);
+            // strcat(header, magic);
 
-            fprintf(fptr, header); // Escribe contenido
+            fprintf(fptr, magic);
             fclose(fptr);
             
-            int y = 0;
+            // int y = 0;
             // while (h)
             // {
             //     /* code */
             // }
             
-
+            sb_log(log_fd, SB_LOG_OK, "PUT %s - cifrado y guardado (pid=%d)", filename, peer.pid);
             write(cliente_fd, &op, sizeof(op));
-            // if(unlink(origina_path) == 0){
-            //     op = SB_OK;
-            //     write(cliente_fd, &op, sizeof(op));
-            //     sb_log(log_fd, SB_LOG_OK, "DEL %s - eliminado (pid=%d)", filename, peer.pid);
-            // }
-            // else{
-            //     op = SB_ERR_NOFILE;
-            //     write(cliente_fd, &op, sizeof(op));
-            //     sb_log(log_fd, SB_LOG_ERROR, "no se puedo eliminar %s (pid=%d)", filename, peer.pid);
+            
+        }
+        else if(buf.op == SB_OP_GET){
+            char origina_path[strlen(argv[1]) + 1];
+            origina_path[strlen(argv[1]) + 1] = '\0';
+            strcpy(origina_path, argv[1]);
+            char filename[MAX_PAYLOAD_SIZE];
 
-            // }
+            int82char(filename, buf.payload, MAX_PAYLOAD_SIZE, 0);
+            strcat(origina_path, filename);
+
+            int memfd = memfd_create("contenido_descifrado", MFD_CLOEXEC);
+            if (memfd < 0) {
+                perror("memfd_create");
+                exit(EXIT_FAILURE);
+            }
+
+            int minifd = open(origina_path, O_RDONLY);
+            if(minifd < 0){
+                enviar_fd(cliente_fd, minifd);
+                sb_log(log_fd, SB_LOG_WARN, "GET %s - archivo no encontrado (pid=%d)", filename, peer.pid);
+                close(memfd);
+            }
+
+            char content[4096];
+            read(minifd, content, sizeof(content));
+            
+            XOR(content);
+            size_t len = strlen(content);
+            write(memfd, content, len);
+
+            lseek(memfd, 0, SEEK_SET);
+
+            sb_log(log_fd, SB_LOG_WARN, "GET %s - entregado a (pid=%d)", filename, peer.pid);
+            enviar_fd(cliente_fd, memfd);
+
+            close(memfd);
         }
 
 
