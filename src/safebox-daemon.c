@@ -62,6 +62,64 @@
 #include "safebox.h"
 
 #define PASSWORD "hola"
+#define PASSWORD_LEN 5
+#define MAX_LSBUF 8192
+#define MAX_PAYLOAD_SIZE 511
+
+#pragma pack(push, 1)
+typedef struct 
+{
+    uint8_t op;
+    uint8_t payload[MAX_PAYLOAD_SIZE];
+}wire_format;
+#pragma pack(pop)
+
+void int32toint8(uint32_t *number, uint8_t * payload, int begin){
+    payload[begin] = (*number >> 24) & 0xFF;
+    payload[begin + 1] = (*number >> 16) & 0xFF;
+    payload[begin + 2] = (*number >> 8) & 0xFF;
+    payload[begin + 3] = *number & 0xFF;
+}
+
+void int8toint32(uint32_t *number, uint8_t * payload){
+    *number |= ((uint32_t)payload[0] << 24);
+    *number |= ((uint32_t)payload[1] << 16);
+    *number |= ((uint32_t)payload[2] << 8);
+    *number |= ((uint32_t)payload[3]);
+}
+void char2int8(const char *string, uint8_t *payload, int payload_size, int begin){
+
+    int i = begin;
+    while (string[i - begin] != '\0' && i < payload_size )
+    {
+        payload[i] = string[i - begin];
+        i++;
+    }
+    payload[i] = '\0';
+
+}
+int int82char(char *string, uint8_t *payload, int payload_size, int begin){
+    int i = begin;
+    int cont = 0;
+    while (payload[i] != '\0' && i < payload_size )
+    {
+        string[i - begin] = payload[i];
+        
+        i++;
+        cont++;
+    }
+    string[i] = '\0';
+    cont++;
+    return cont;
+}
+void XOR(char * original){
+    int g = 0;
+    while (original[g] != '\0')
+    {
+        original[g] = PASSWORD[g % PASSWORD_LEN];
+    }
+    
+}
 /* ---------------------------------------------------------------
  * Variable global para comunicar el manejador de señal con el loop
  * 'volatile sig_atomic_t' es el único tipo seguro en signal handlers
@@ -125,12 +183,23 @@ int main(int argc, char *argv[]){
 
     // ojo pelado abrimos un fd de la boveda, al final del programa debe cerrarce
     DIR *sb_fd = opendir(argv[1]);
+    struct stat st;
     if(sb_fd == NULL){
         fprintf(stderr, "error: '%s' no es un drectorio valido\n", argv[1]);
         exit(EXIT_FAILURE);
     }
+    stat(argv[1], &st);
 
-
+    // verificamos que tiene los permisos que son
+    if(!(st.st_mode & S_IRUSR)){
+        fprintf(stderr, "error: no se puede leer en el directorio '%s'\n", argv[1]);
+        exit(EXIT_FAILURE);
+    }
+    else if(!(st.st_mode & S_IWUSR)){
+        fprintf(stderr, "error: no se puede escribir en el directorio '%s'\n", argv[1]);
+        exit(EXIT_FAILURE);
+    }
+    
 
 
     // Paso 0: hay que verificar si el safebox existe, y si tenemos permiso de escritura y lectura
@@ -248,31 +317,29 @@ int main(int argc, char *argv[]){
     // que el accept reaccionace y volviera a verificar la condicion del bucle.
     // ahora este socked no se bloquea con nada.
     fcntl(daemon_fd, F_SETFL, O_NONBLOCK);
+    struct ucred peer;
+    socklen_t peer_len = sizeof(peer);
+    int cliente_fd = -1;
     while (seguir_corriendo) {
         
-        struct ucred peer;
-        socklen_t peer_len = sizeof(peer);
+        int tmp_fd = accept(daemon_fd, NULL, NULL);
         // aqui empezamos con el accept() para bloquear al daemon hasta que llegue una conexion
-        int cliente_fd = accept(daemon_fd, NULL, NULL);
-        if (cliente_fd < 0) {
+        if (tmp_fd < 0) {
             // si el nuevo socket es -1, y como estamos en un socket no bloqueante, puede ser
             // que el accept, como no consiguio conexiones, mandace alguno de dos erroes en errno
             // EAGAIN significa: recurso temporalmente no disponible
             // EWOULDBLOCK: entiendo que este significa que una operacion no puedo completarse porque
             // no esta lista
             // El caso es que si manda alguno de estos, no queremos matar al proceso con un error
-            if (errno == EAGAIN || errno == EWOULDBLOCK){
-                continue;
-            }
-            else{
+            if (!(errno == EAGAIN || errno == EWOULDBLOCK)){
                 perror("accept");
                 exit(EXIT_FAILURE);   /* intentar con el siguiente cliente */
             }
         }
         else{
 
+            cliente_fd = tmp_fd;
             // para el log del pid y el uid
-        
             if (getsockopt(cliente_fd, SOL_SOCKET, SO_PEERCRED,
                         &peer, &peer_len) == 0) {
                 sb_log(log_fd, SB_LOG_INFO, "conexion entrante uid=%d pid=%d", peer.uid, peer.pid);
@@ -280,33 +347,40 @@ int main(int argc, char *argv[]){
 
         }
 
-        
+        if(cliente_fd == -1){
+            continue;
+        }
 
         // char buf[256];
-        sb_auth_msg_t buf;
+        wire_format buf;
         
         // ssize_t n;
         ssize_t n = read(cliente_fd, &buf, sizeof(buf));
-        // while ((n = read(cliente_fd, buf, sizeof(buf) - 1)) > 0) {
-        //     buf[n] = '\0';
-        //     // printf("%s", buf);
-        // }
-        if (n != sizeof(buf)){
+        
+
+        if(n == 0){
+            continue;
+        }
+        else if (n != sizeof(buf)){
             sb_log(log_fd, SB_LOG_ERROR, "no se puedo recibier el coso con n %d", n);
             exit(EXIT_FAILURE);
         }
 
-        sb_log(log_fd, SB_LOG_WARN, "se recivio: %d", buf.op);
+        // sb_log(log_fd, SB_LOG_WARN, "se recivio: %d", buf.op);
 
-        if(buf.op == 0x01){
+        if(buf.op == SB_OP_LIST){
             // aqui hay dos posibilidades, si no hay mas nada entonces quiero llamar a list
             // pero si hay algo mas entonces quiero autenticar
 
-            if(buf.password_hash != 0x00){
+            if(buf.payload[0] != 0x00){
                 // queremos autenticar
                 uint32_t pass_hash = sb_djb2(PASSWORD);
                 uint8_t op;
-                if (pass_hash == buf.password_hash){
+                uint32_t n_pass;
+                int8toint32(&n_pass, buf.payload);
+
+
+                if (pass_hash == n_pass){
                     // le mandamos que todo chevere (0x00)
                     op = SB_OK;
                     write(cliente_fd, &op,sizeof(op));
@@ -321,12 +395,117 @@ int main(int argc, char *argv[]){
             }
             else{
                 // queremos hacer list 
+                
+                char buffer[MAX_LSBUF] = "\0";
+                struct dirent *files;
+                while ((files = readdir(sb_fd)) != NULL)
+                {
+                    if(files->d_name[0] == '.') continue;
+
+                    strcat(buffer, files->d_name);
+                    strcat(buffer, "\n");
+                }
+                strcat(buffer, "\0");
+
+                write(cliente_fd, buffer, sizeof(buffer));
+
             }
 
         }
-        else if(buf.op == 0x05){
+        else if(buf.op == SB_OP_BYE){
             sb_log(log_fd, SB_LOG_INFO, "BYE uid=%d pid=%d - sesion cerrada", peer.uid, peer.pid);
             close(cliente_fd);
+            cliente_fd = -1;
+        }
+        else if(buf.op == SB_OP_DEL){
+            
+            char *origina_path = argv[1];
+            // strcpy(argv[1], origina_path);
+            char filename[sizeof(buf.payload)];
+            int82char(filename, buf.payload, sizeof(buf.payload), 0);
+
+            
+            strcat(origina_path, filename);
+            
+            
+            uint8_t op = 0;
+            if(unlink(origina_path) == 0){
+                op = SB_OK;
+                write(cliente_fd, &op, sizeof(op));
+                sb_log(log_fd, SB_LOG_OK, "DEL %s - eliminado (pid=%d)", filename, peer.pid);
+            }
+            else{
+                op = SB_ERR_NOFILE;
+                write(cliente_fd, &op, sizeof(op));
+                sb_log(log_fd, SB_LOG_ERROR, "no se puedo eliminar %s (pid=%d)", filename, peer.pid);
+
+            }
+        }
+        else if(buf.op == SB_OP_PUT){
+            char *origina_path = argv[1];
+            char filename[MAX_PAYLOAD_SIZE];
+            char fp[MAX_PAYLOAD_SIZE];
+            
+            int m = int82char(filename, buf.payload, MAX_PAYLOAD_SIZE, 0);
+            int tmp = 8 - (m % 8);
+            int82char(fp, buf.payload,MAX_PAYLOAD_SIZE, m + tmp);
+            
+            strcat(origina_path, filename);
+
+            FILE *fptr;
+            // Crea un archivo llamado "archivo.txt" en modo escritura
+            fptr = fopen(origina_path, "w");
+            
+            int fp_fd = open(fp, O_RDONLY);
+
+            uint8_t op = SB_OK;
+            char content[1024];
+            ssize_t j = read(fp_fd, content, sizeof(content));
+            if(j != sizeof(content)){
+                write(cliente_fd, &op, sizeof(op));
+            }
+
+            if(fptr == NULL) {
+                op = SB_ERR_NOFILE;
+                write(cliente_fd, &op, sizeof(op));
+            }
+
+            char magic[SB_MAGIC_LEN + 1] = SB_MAGIC;
+
+            strcat(magic, content);
+            XOR(magic);
+            char header[8];
+            uint32_t ml = SB_MAGIC_LEN ;
+            header[0] = 0x01;
+            int32toint8(&ml, header, 1);
+            header[5] = 0x00;
+            header[6] = 0x00;
+            header[7] = 0x00;
+
+            strcat(header, magic);
+
+            fprintf(fptr, header); // Escribe contenido
+            fclose(fptr);
+            
+            int y = 0;
+            // while (h)
+            // {
+            //     /* code */
+            // }
+            
+
+            write(cliente_fd, &op, sizeof(op));
+            // if(unlink(origina_path) == 0){
+            //     op = SB_OK;
+            //     write(cliente_fd, &op, sizeof(op));
+            //     sb_log(log_fd, SB_LOG_OK, "DEL %s - eliminado (pid=%d)", filename, peer.pid);
+            // }
+            // else{
+            //     op = SB_ERR_NOFILE;
+            //     write(cliente_fd, &op, sizeof(op));
+            //     sb_log(log_fd, SB_LOG_ERROR, "no se puedo eliminar %s (pid=%d)", filename, peer.pid);
+
+            // }
         }
 
 

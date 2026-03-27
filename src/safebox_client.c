@@ -22,6 +22,8 @@
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
+#define MAX_PAYLOAD_SIZE 511
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,10 +38,55 @@
 #include "safebox.h"
 #include "safebox_client.h"
 
+#pragma pack(push, 1)
+typedef struct 
+{
+    uint8_t op;
+    uint8_t payload[MAX_PAYLOAD_SIZE];
+}wire_format;
+#pragma pack(pop)
+
+void int32toint8(uint32_t *number, uint8_t * payload){
+    payload[0] = (*number >> 24) & 0xFF;
+    payload[1] = (*number >> 16) & 0xFF;
+    payload[2] = (*number >> 8) & 0xFF;
+    payload[3] = *number & 0xFF;
+}
+
+void int8toint32(uint32_t *number, uint8_t * payload){
+    *number |= ((uint32_t)payload[0] << 24);
+    *number |= ((uint32_t)payload[1] << 16);
+    *number |= ((uint32_t)payload[2] << 8);
+    *number |= ((uint32_t)payload[3]);
+}
+
+void char2int8(const char *string, uint8_t *payload, int payload_size, int begin){
+
+    int i = begin;
+    while (string[i - begin] != '\0' && i < payload_size )
+    {
+        payload[i] = string[i - begin];
+        i++;
+    }
+    payload[i] = '\0';
+
+}
+int int82char(char *string, uint8_t *payload, int payload_size, int begin){
+    int i = begin;
+    int cont = 0;
+    while (payload[i - begin] != '\0' && i < payload_size )
+    {
+        string[i] = payload[i - begin];
+        i++;
+        cont++;
+    }
+    string[i] = '\0';
+    cont++;
+    return cont;
+}
 
 int sb_connect(const char *socket_path, const char *password){
 
-    (void)password;
     int sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
     // if (sockfd < 0) {
     //     perror("socket");
@@ -55,9 +102,26 @@ int sb_connect(const char *socket_path, const char *password){
         return -1;
     }
 
-    sb_auth_msg_t message;
+    wire_format message;
     message.op = SB_OP_LIST;
-    message.password_hash = sb_djb2(password);
+    uint32_t pass = sb_djb2(password);
+    int32toint8(&pass, message.payload);
+    // message.password_hash = sb_djb2(password);
+    // printf("hasheado: %d\n", sb_djb2(password));
+    // char palabra[11] = "murcielago";
+    // printf("tamaño de la palabra: %ld\n", sizeof(palabra));
+    // uint8_t arr[11];
+    // char2int8(palabra, arr, 11, 0);
+
+    // for (int i = 0; i < 11; i++)
+    // {
+    //     printf("letra: %d\n", arr[i]);
+    // }
+    
+    // printf("troceado: %d,%d,%d,%d,\n",arr[0],arr[1],arr[2],arr[3]);
+    // uint32_t npass;
+    // int8toint32(&npass, arr);
+    // printf("normal: %d\n", npass);
     
     write(sockfd, &message, sizeof(message));
 
@@ -80,20 +144,43 @@ int sb_connect(const char *socket_path, const char *password){
 
 
 void sb_bye(int sockfd){
-    sb_auth_msg_t message;
+    wire_format message;
     message.op = SB_OP_BYE;
-    message.password_hash = 1;
-    printf("%ld\n", sizeof(message));
+    // message.password_hash = 1;
+    
     write(sockfd, &message, sizeof(message));
     close(sockfd);
 }
 
 int sb_list(int sockfd, char *buf, size_t buflen){
-    (void)sockfd;
-    (void)buf;
-    (void)buflen;
+    wire_format message;
+    message.op = SB_OP_LIST;
+    message.payload[0] = 0;
     
-    return -1;
+    // le pides al daemos que te de la lista de archivos
+    
+    write(sockfd, &message, sizeof(message));
+
+    // ellos vendrar en un char[] plano, y eso lo tengo que poner en el buf
+    // si no viene nada la shell se encarga de decirlo, pero nosotro se lo decimos a la shell
+    ssize_t n;
+    n = read(sockfd, buf, buflen);
+    
+    
+    if(n >= 0){
+        int files;
+        for (int i = 0; i < (int)buflen; i++)
+        {
+            if (buf[i] == '\n'){
+                files++;
+            }
+        }
+        return files;
+    }
+    else{
+        return -1;
+    }
+    
 }
 
 int sb_get(int sockfd, const char *filename){
@@ -104,16 +191,58 @@ int sb_get(int sockfd, const char *filename){
 }
 
 int sb_put(int sockfd, const char *filename, const char *filepath){
-    (void) sockfd;
-    (void) filename;
-    (void) filepath;
+    wire_format message;
+    message.op = SB_OP_PUT;
+    printf("tamano filename: %ld , %ld\n",sizeof(filename), sizeof(message.payload));
 
+    char2int8(filename, message.payload, sizeof(filename), 0);
+    for (int i = 0; i < 40; i++)
+    {
+        printf("letra: %d\n", message.payload[i]);
+    }
+    printf("tamano filename: %ld , %ld\n",sizeof(filename), sizeof(message.payload));
+    char2int8(filepath, message.payload, sizeof(message.payload), sizeof(filename));
+    
+    for (int i = 0; i < 40; i++)
+    {
+        printf("letra: %d\n", message.payload[i]);
+    }
+    write(sockfd, &message, sizeof(message));
+
+    uint8_t op;
+    ssize_t n;
+    n = read(sockfd, &op, sizeof(op));
+    if(n != sizeof(op)){
+        return -1;
+    }
+
+    
+    if(op == SB_OK){
+        return 0;
+    }
+    else{
+        return -1;
+    }
     return -1;
 }
 
 int sb_del(int sockfd, const char *filename){
-    (void) sockfd;
-    (void) filename;
-    
-    return -1;
+    wire_format message;
+    message.op = SB_OP_DEL;
+    char2int8(filename, message.payload, sizeof(message.payload), 0);
+
+    write(sockfd, &message, sizeof(message));
+
+    uint8_t op;
+    ssize_t n = read(sockfd, &op, sizeof(op));
+    if (n != sizeof(op)){
+        return -1;
+    }
+
+    if(op == SB_OK){
+        return 0;
+    }
+    else{
+        return -1;
+    }
 }
