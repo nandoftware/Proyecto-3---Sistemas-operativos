@@ -620,18 +620,21 @@ int main(int argc, char *argv[]){
             int82char(filename, buf.payload, MAX_PAYLOAD_SIZE, 0);
             strcat(origina_path, filename);
 
+            int minifd = open(origina_path, O_RDONLY);
+
+            if(minifd < 0){
+                enviar_fd(cliente_fd, minifd);
+                sb_log(log_fd, SB_LOG_WARN, "GET %s - archivo no encontrado (pid=%d)", filename, peer.pid);
+                continue;
+            }
+
             int memfd = memfd_create("contenido_descifrado", MFD_CLOEXEC);
             if (memfd < 0) {
                 perror("memfd_create");
                 exit(EXIT_FAILURE);
             }
 
-            int minifd = open(origina_path, O_RDONLY);
-            if(minifd < 0){
-                enviar_fd(cliente_fd, minifd);
-                sb_log(log_fd, SB_LOG_WARN, "GET %s - archivo no encontrado (pid=%d)", filename, peer.pid);
-                close(memfd);
-            }
+            
 
             char content[4096];
             read(minifd, content, sizeof(content));

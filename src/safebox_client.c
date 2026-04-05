@@ -87,6 +87,9 @@ int int82char(char *string, uint8_t *payload, int payload_size, int begin){
 
 static int recibir_fd(int socket_fd) {
 
+    // if (socket_fd < 0){
+    //     return -1;
+    // }
     /* Byte dummy que el sender envía como datos reales */
     char dummy;
     struct iovec iov = {
@@ -210,8 +213,10 @@ int sb_list(int sockfd, char *buf, size_t buflen){
 
     // ellos vendrar en un char[] plano, y eso lo tengo que poner en el buf
     // si no viene nada la shell se encarga de decirlo, pero nosotro se lo decimos a la shell
+   
     ssize_t n;
-    n = read(sockfd, buf, buflen);
+
+    n = recv(sockfd, buf, buflen, 0);
     
     if(n >= 0){
         int files = 0;
@@ -248,7 +253,7 @@ int sb_get(int sockfd, const char *filename){
 
     int fd = recibir_fd(sockfd);
     
-    
+    printf("%d", fd);
 
     return fd;
 }

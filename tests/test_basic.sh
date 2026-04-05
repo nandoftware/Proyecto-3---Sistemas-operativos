@@ -83,6 +83,7 @@ V=$(od -A n -t x1 -N 1 "$BOVEDA/prueba.txt" | tr -d ' \n')
 # ── Test 3: LIST ──────────────────────────────────
 echo ""; echo "--- Test 3: LIST ---"
 OUT=$(run_cli "list")
+echo "$OUT"
 echo "$OUT" | grep -q "prueba.txt" && ok "LIST muestra prueba.txt" \
     || fail "LIST no muestra prueba.txt"
 
