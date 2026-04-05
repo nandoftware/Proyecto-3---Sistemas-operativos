@@ -547,7 +547,7 @@ int main(int argc, char *argv[]){
             
 
             // int tmp = 8 - (m % 8);
-            sb_log(log_fd, SB_LOG_ERROR, "%d %d %d", m, u);
+            // sb_log(log_fd, SB_LOG_ERROR, "%d %d %d", m, u);
             int82char(fp, buf.payload,MAX_PAYLOAD_SIZE, u);
             
             strcat(origina_path, filename);
