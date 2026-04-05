@@ -213,14 +213,23 @@ int sb_list(int sockfd, char *buf, size_t buflen){
     ssize_t n;
     n = read(sockfd, buf, buflen);
     
-    
     if(n >= 0){
-        int files;
-        for (int i = 0; i < (int)buflen; i++)
+        int files = 0;
+        int i ;
+        // int b = 1;
+        for (i = 0; i < (int)buflen; i++)
         {
             if (buf[i] == '\n'){
+                
+                
                 files++;
+                // printf("%d\n", i);
+
             }
+        }
+        // printf("%d %d\n", i, files);
+        if(strlen(buf) != 0){
+            files++;
         }
         return files;
     }
@@ -255,7 +264,7 @@ int sb_put(int sockfd, const char *filename, const char *filepath){
     //     printf("letra: %d\n", message.payload[i]);
     // }
     // printf("tamano filename: %ld , %ld\n",sizeof(filename), sizeof(message.payload));
-    char2int8(filepath, message.payload, sizeof(message.payload), sizeof(filename));
+    char2int8(filepath, message.payload, sizeof(message.payload), sizeof(filename)+1);
     
     // for (int i = 0; i < 40; i++)
     // {

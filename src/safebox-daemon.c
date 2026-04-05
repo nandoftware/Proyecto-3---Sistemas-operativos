@@ -61,7 +61,7 @@
 
 #include "safebox.h"
 
-#define PASSWORD "hola"
+#define PASSWORD "sbx2026"
 #define PASSWORD_LEN 5
 #define MAX_LSBUF 8192
 #define MAX_PAYLOAD_SIZE 511
@@ -249,23 +249,31 @@ int main(int argc, char *argv[]){
         perror("falta el nombre del safebox");
         exit(EXIT_FAILURE);
     }
+    // printf("%ld\n", strlen(argv[1]));
+    char safebox[strlen(argv[1]) + 2];
+    strcpy(safebox, argv[1]);
+    if(safebox[strlen(argv[1])-1] != 47){
+        safebox[strlen(argv[1])] = 47;
+        safebox[strlen(argv[1]) + 1] = '\0';
+    }
+    // printf("./test_boveda_$$");
 
     // ojo pelado abrimos un fd de la boveda, al final del programa debe cerrarce
-    DIR *sb_fd = opendir(argv[1]);
+    DIR *sb_fd = opendir(safebox);
     struct stat st;
     if(sb_fd == NULL){
-        fprintf(stderr, "error: '%s' no es un drectorio valido\n", argv[1]);
+        fprintf(stderr, "error: '%s' no es un drectorio valido\n", safebox);
         exit(EXIT_FAILURE);
     }
-    stat(argv[1], &st);
+    stat(safebox, &st);
 
     // verificamos que tiene los permisos que son
     if(!(st.st_mode & S_IRUSR)){
-        fprintf(stderr, "error: no se puede leer en el directorio '%s'\n", argv[1]);
+        fprintf(stderr, "error: no se puede leer en el directorio '%s'\n", safebox);
         exit(EXIT_FAILURE);
     }
     else if(!(st.st_mode & S_IWUSR)){
-        fprintf(stderr, "error: no se puede escribir en el directorio '%s'\n", argv[1]);
+        fprintf(stderr, "error: no se puede escribir en el directorio '%s'\n", safebox);
         exit(EXIT_FAILURE);
     }
     
@@ -376,7 +384,7 @@ int main(int argc, char *argv[]){
     // ----------------- BUCLE PRINCIPAL DEL DAEMON -----------------
 
     // acemos los logs de que se inicio el daemon y de que esta escuchando de su socket
-    sb_log(log_fd, SB_LOG_INFO, "daemon iniciado pid=%d %s", getpid(), argv[1]);
+    sb_log(log_fd, SB_LOG_INFO, "daemon iniciado pid=%d %s", getpid(), safebox);
     sb_log(log_fd, SB_LOG_INFO, "escuchando en %s", SB_SOCKET_PATH);
 
     // esta funcioncita es muy importante, pues sin ella el proceso nujnca se puede cerrar bien
@@ -475,7 +483,11 @@ int main(int argc, char *argv[]){
                     strcat(buffer, "\n");
                 }
                 strcat(buffer, "\0");
-
+                // sb_log(log_fd, SB_LOG_INFO, "%d", strlen(buffer));
+                if(strlen(buffer) != 0){
+                    buffer[strlen(buffer) - 1] = '\0';
+                }
+                rewinddir(sb_fd);
                 write(cliente_fd, buffer, sizeof(buffer));
 
             }
@@ -487,9 +499,9 @@ int main(int argc, char *argv[]){
             cliente_fd = -1;
         }
         else if(buf.op == SB_OP_DEL){
-            char origina_path[strlen(argv[1]) + 1];
-            origina_path[strlen(argv[1]) + 1] = '\0';
-            strcpy(origina_path, argv[1]);
+            char origina_path[strlen(safebox) + 1];
+            origina_path[strlen(safebox) + 1] = '\0';
+            strcpy(origina_path, safebox);
             char filename[sizeof(buf.payload)];
             int82char(filename, buf.payload, sizeof(buf.payload), 0);
 
@@ -509,17 +521,37 @@ int main(int argc, char *argv[]){
             }
         }
         else if(buf.op == SB_OP_PUT){
-            char origina_path[strlen(argv[1]) + 1];
-            origina_path[strlen(argv[1]) + 1] = '\0';
-            strcpy(origina_path, argv[1]);
+            char origina_path[strlen(safebox) + 1];
+            origina_path[strlen(safebox) + 1] = '\0';
+            strcpy(origina_path, safebox);
             char filename[MAX_PAYLOAD_SIZE];
             char fp[MAX_PAYLOAD_SIZE];
+
+            // for (int a = 0; a < 40; a++)
+            // {
+            //     sb_log(log_fd, SB_LOG_ERROR, "%d", buf.payload[a]);
+            // }
             
             int m = int82char(filename, buf.payload, MAX_PAYLOAD_SIZE, 0);
-            int tmp = 8 - (m % 8);
-            int82char(fp, buf.payload,MAX_PAYLOAD_SIZE, m + tmp);
+
+            int u = m;
+            int secure = 1;
+            while (u < MAX_PAYLOAD_SIZE && secure)
+            {
+                if(buf.payload[u] != '\0'){
+                    secure = 0;
+                    u--;
+                }
+                u++;
+            }
+            
+
+            // int tmp = 8 - (m % 8);
+            sb_log(log_fd, SB_LOG_ERROR, "%d %d %d", m, u);
+            int82char(fp, buf.payload,MAX_PAYLOAD_SIZE, u);
             
             strcat(origina_path, filename);
+            // sb_log(log_fd, SB_LOG_ERROR, "%s", origina_path);
 
             FILE *fptr;
             
@@ -552,10 +584,10 @@ int main(int argc, char *argv[]){
 
             
             XOR(magic);
-            for (int a = 0; a < 40; a++)
-            {
-                sb_log(log_fd, SB_LOG_ERROR, "%d", magic[a]);
-            }
+            // for (int a = 0; a < 40; a++)
+            // {
+            //     sb_log(log_fd, SB_LOG_ERROR, "%d", magic[a]);
+            // }
             // char header[8];
             // uint32_t ml = SB_MAGIC_LEN ;
             // header[0] = 0x01;
@@ -580,9 +612,9 @@ int main(int argc, char *argv[]){
             
         }
         else if(buf.op == SB_OP_GET){
-            char origina_path[strlen(argv[1]) + 1];
-            origina_path[strlen(argv[1]) + 1] = '\0';
-            strcpy(origina_path, argv[1]);
+            char origina_path[strlen(safebox) + 1];
+            origina_path[strlen(safebox) + 1] = '\0';
+            strcpy(origina_path, safebox);
             char filename[MAX_PAYLOAD_SIZE];
 
             int82char(filename, buf.payload, MAX_PAYLOAD_SIZE, 0);
